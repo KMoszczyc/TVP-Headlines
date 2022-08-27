@@ -4,7 +4,7 @@ import cv2
 
 print("[INFO] starting video file thread...")
 input_video_path = 'test_data/videos/vid1.mp4'
-fvs = FileVideoStream(input_video_path).start()
+fvs = FileVideoStream(input_video_path, queue_size=1280).start()
 cap = cv2.VideoCapture(input_video_path)
 time.sleep(1.0)
 
