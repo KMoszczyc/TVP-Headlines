@@ -1,8 +1,12 @@
+import os
+
 import cv2
 import numpy as np
 import pytesseract
 import time
 from FPS import FPS
+from video_download import download_video
+import matplotlib.pyplot as plt
 
 # Tesseract Page segmentation modes (-- psm):
 #   0    Orientation and script detection (OSD) only.
@@ -26,7 +30,7 @@ print(pytesseract.get_languages(config=''))
 
 HEADLINE_AVG_COLOR = (129.5148472, 62.9367192, 53.23520085)  # BGR
 SECONDS_TO_SKIP_AFTER_LAST_HEADLINE = 20
-HEADLINE_ANIMATION_SECONDS = 2
+HEADLINE_ANIMATION_SECONDS = 6
 FRAMES_TO_SKIP = 75
 
 
@@ -48,19 +52,21 @@ def extract_headline(frame, do_ocr):
 
     # if bgr channels are less different than 10 (in scale 0-255) then it's probably a headline
     if col_diff[0] < 10 and col_diff[1] < 10 and col_diff[2] < 10:
-        print('Color diff:', col_diff)
+        # print('Color diff:', col_diff)
         headline_like_frame_detected = True
         if do_ocr:
-            resize_scale = 0.4
+            resize_scale = 0.9
             gray_img = cv2.cvtColor(headline_img, cv2.COLOR_BGR2GRAY)
             ret, binary_img = cv2.threshold(gray_img, 80, 255, cv2.THRESH_BINARY)
             resized_img = cv2.resize(binary_img, (0, 0), fx=resize_scale, fy=resize_scale, interpolation=cv2.INTER_AREA)
-            headline = pytesseract.image_to_string(resized_img, config=r'--psm 7 ', lang='pol')
+            # cv2.imshow('image', resized_img)
+            # cv2.waitKey(0)
+            headline = pytesseract.image_to_string(resized_img, config=r'--psm 7', lang='pol')
 
     return headline_img, headline, headline_like_frame_detected
 
 
-def tvp_headlines_mp4(input_video_path, output_headlines_path):
+def tvp_headlines_mp4(input_video_path, output_headlines_path, dst_screenshot_headlines_path):
     """Extract all headlines from a .mp4 file"""
     cap = cv2.VideoCapture(input_video_path)
     fps = FPS()
@@ -70,12 +76,13 @@ def tvp_headlines_mp4(input_video_path, output_headlines_path):
 
     print(width, height, video_fps)
 
-    headlines = []
+    headline_txts = []
     frame_count = 0
     last_headline_frame = 0
     headline_animation_start_frame = 0
     has_headline_animation_count_started = False
     do_ocr = False
+    headline_screenshots = []
 
     while True:
 
@@ -86,7 +93,7 @@ def tvp_headlines_mp4(input_video_path, output_headlines_path):
         # Skip ocr if last headline was seen 20s ago
         if frames_to_seconds(video_fps, frame_count - last_headline_frame) > SECONDS_TO_SKIP_AFTER_LAST_HEADLINE:
 
-            # Wait for headline animation to end (2S)
+            # Wait for headline animation to end (2S) - makes sure that we don't OCR on an empty headline or that we skip short headlines with currently presented person names
             if frames_to_seconds(video_fps, frame_count - headline_animation_start_frame) > HEADLINE_ANIMATION_SECONDS and has_headline_animation_count_started:
                 do_ocr = True
 
@@ -106,19 +113,21 @@ def tvp_headlines_mp4(input_video_path, output_headlines_path):
             if headline != '':
                 print('Frame:', frame_count, 'Headline:', headline)
                 last_headline_frame = frame_count
-                headlines.append(headline)
                 do_ocr = False
                 has_headline_animation_count_started = False
                 headline_animation_start_frame = 0
 
+                headline_txts.append(headline)
+                headline_screenshots.append(headline_img)
                 save_headline(headline, output_headlines_path)
 
         time_elapsed = frames_to_seconds(video_fps, frame_count)
         last_headline_elapsed = frames_to_seconds(video_fps, frame_count - last_headline_frame)
         animation_time_elapsed = 0 if headline_animation_start_frame == 0 else frames_to_seconds(video_fps, frame_count - headline_animation_start_frame)
 
-        print('Time elapsed:', f'{time_elapsed}s', '\tLast headline:', f'{last_headline_elapsed}s',
-              '\tHeadline animation:', f'{animation_time_elapsed}s', f'\tHeadline count: {len(headlines)}', f'FPS: {fps()}', frame_count)
+        if frame_count % 100 == 0:
+            print('Time elapsed:', f'{time_elapsed}s', '\tLast headline:', f'{last_headline_elapsed}s',
+                  '\tHeadline animation:', f'{animation_time_elapsed}s', f'\tHeadline count: {len(headline_txts)}', f'FPS: {fps()}', frame_count)
 
         frame_count += 1
 
@@ -127,14 +136,18 @@ def tvp_headlines_mp4(input_video_path, output_headlines_path):
         # if c & 0xFF == ord('q'):
         #     break
 
+    # Save merged headline screenshots
+    screenshots_merged = np.concatenate(headline_screenshots, axis=0)
+    cv2.imwrite(dst_screenshot_headlines_path, screenshots_merged)
+
     cap.release()
     cv2.destroyAllWindows()
     # fvs.stop()
 
-    print(headlines)
+    print(headline_txts)
 
 
-def tvp_headlines_mp4_skip(input_video_path, output_headlines_path):
+def tvp_headlines_mp4_skip(input_video_path, output_headlines_path, video_name):
     """Extract all headlines from a .mp4 file"""
 
     cap = cv2.VideoCapture(input_video_path)
@@ -181,8 +194,9 @@ def tvp_headlines_mp4_skip(input_video_path, output_headlines_path):
         frame_count += FRAMES_TO_SKIP
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count)
 
-        print('Time elapsed:', f'{time_elapsed}s', '\tLast headline:', f'{last_headline_elapsed}s',
-              '\tHeadline animation:', f'{animation_time_elapsed}s', f'\tHeadline count: {len(headlines)}', f'FPS: {fps()}', frame_count)
+        if frame_count % 100 == 0:
+            print('Time elapsed:', f'{time_elapsed}s', '\tLast headline:', f'{last_headline_elapsed}s',
+                  '\tHeadline animation:', f'{animation_time_elapsed}s', f'\tHeadline count: {len(headlines)}', f'FPS: {fps()}', frame_count)
 
     cap.release()
     cv2.destroyAllWindows()
@@ -200,13 +214,34 @@ def save_headline(headline, path):
         f.write(headline.strip('\n') + '\n')
 
 
+def create_dir(path):
+    if not os.path.exists(path):
+        os.makedirs(path)
+        print(f"Directory {path} is created!")
+
+
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
-    input_video_path = 'test_data/videos/vid1.mp4'
-    output_headlines_path = 'headlines1.txt'
+    video_dir_path = 'data/'
+    video_filenames = [filename for filename in os.listdir(video_dir_path) if filename.rsplit('.', 1)[1] == 'mp4']
+    dst_txt_headline_dir_path = 'output/txt_headlines'
+    dst_screenshot_headline_dir_path = 'output/screenshot_headlines'
 
-    start_time = time.time()
-    # tvp_headlines_mp4(input_video_path, output_headlines_path)
-    tvp_headlines_mp4_skip(input_video_path, output_headlines_path)
+    # create dirs if they don't exist
+    create_dir(video_dir_path)
+    create_dir(dst_txt_headline_dir_path)
+    create_dir(dst_screenshot_headline_dir_path)
 
-    print("elasped time: {:.2f}s".format(time.time() - start_time))
+    # download_video()
+
+    for filename in video_filenames:
+        video_name = filename.split('.mp4')[0]
+        input_video_path = os.path.join(video_dir_path, filename)
+        dst_txt_headlines_path = os.path.join(dst_txt_headline_dir_path, f'{video_name}.txt')
+        dst_screenshot_headlines_path = os.path.join(dst_screenshot_headline_dir_path, f'{video_name}.jpg')
+
+        start_time = time.time()
+        tvp_headlines_mp4(input_video_path, dst_txt_headlines_path, dst_screenshot_headlines_path)
+        # tvp_headlines_mp4_skip(input_video_path, dst_txt_headlines_path)
+
+        print("elasped time: {:.2f}s".format(time.time() - start_time))
