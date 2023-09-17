@@ -5,7 +5,7 @@ import numpy as np
 import pytesseract
 import time
 from FPS import FPS
-from video_download import download_video
+from video_download import download_video, download_all_videos
 import matplotlib.pyplot as plt
 
 # Tesseract Page segmentation modes (-- psm):
@@ -30,8 +30,13 @@ print(pytesseract.get_languages(config=''))
 
 HEADLINE_AVG_COLOR = (129.5148472, 62.9367192, 53.23520085)  # BGR
 SECONDS_TO_SKIP_AFTER_LAST_HEADLINE = 20
-HEADLINE_ANIMATION_SECONDS = 6
+HEADLINE_ANIMATION_SECONDS = 3
 FRAMES_TO_SKIP = 75
+COLOR_SIMILARITY_THRESHOLD = 10
+
+dst_txt_headline_dir_path = 'output/txt_headlines'
+dst_screenshot_headline_dir_path = 'output/screenshot_headlines'
+last_headline_color = (0, 0, 0)
 
 
 def extract_headline(frame, do_ocr):
@@ -48,26 +53,34 @@ def extract_headline(frame, do_ocr):
 
     # Get avg color and compare it to a headline avg color
     current_avg_color = np.average(np.average(headline_img, axis=0), axis=0)
-    col_diff = abs(np.subtract(HEADLINE_AVG_COLOR, current_avg_color))
 
-    # if bgr channels are less different than 10 (in scale 0-255) then it's probably a headline
-    if col_diff[0] < 10 and col_diff[1] < 10 and col_diff[2] < 10:
-        # print('Color diff:', col_diff)
+    # if bgr channels are less different than the COLOR_SIMILARITY_THRESHOLD (10), (in scale 0-255) then it's probably a headline
+    if are_colors_similar(HEADLINE_AVG_COLOR, current_avg_color, COLOR_SIMILARITY_THRESHOLD):
         headline_like_frame_detected = True
         if do_ocr:
             resize_scale = 0.9
             gray_img = cv2.cvtColor(headline_img, cv2.COLOR_BGR2GRAY)
             ret, binary_img = cv2.threshold(gray_img, 80, 255, cv2.THRESH_BINARY)
             resized_img = cv2.resize(binary_img, (0, 0), fx=resize_scale, fy=resize_scale, interpolation=cv2.INTER_AREA)
-            # cv2.imshow('image', resized_img)
-            # cv2.waitKey(0)
-            headline = pytesseract.image_to_string(resized_img, config=r'--psm 7', lang='pol')
 
-    return headline_img, headline, headline_like_frame_detected
+            headline = pytesseract.image_to_string(resized_img, config=r'--psm 7', lang='pol')
+            current_avg_color = tuple(int(x) for x in current_avg_color)
+
+    return headline_img, headline, headline_like_frame_detected, current_avg_color
+
+
+def calculate_color_diff(color_a, color_b):
+    return abs(np.subtract(color_a, color_b))
+
+
+def are_colors_similar(color_a, color_b, threshold):
+    color_diff = calculate_color_diff(color_a, color_b)
+    return color_diff[0] <= threshold and color_diff[1] <= threshold and color_diff[2] <= threshold
 
 
 def tvp_headlines_mp4(input_video_path, output_headlines_path, dst_screenshot_headlines_path):
     """Extract all headlines from a .mp4 file"""
+    global last_headline_color
     cap = cv2.VideoCapture(input_video_path)
     fps = FPS()
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -98,7 +111,7 @@ def tvp_headlines_mp4(input_video_path, output_headlines_path, dst_screenshot_he
                 do_ocr = True
 
             # Extract headline with ocr
-            headline_img, headline, headline_like_frame_detected = extract_headline(frame, do_ocr)
+            headline_img, headline, headline_like_frame_detected, headline_avg_color = extract_headline(frame, do_ocr)
 
             # If extract_headline stopped detecting headline-like frames then stop animation counters (headline-like frames must be detected every frame for at least 2 seconds)
             if has_headline_animation_count_started and not headline_like_frame_detected:
@@ -109,13 +122,25 @@ def tvp_headlines_mp4(input_video_path, output_headlines_path, dst_screenshot_he
                 has_headline_animation_count_started = True
                 headline_animation_start_frame = frame_count
 
-            # Save headline, reset counters
-            if headline != '':
+            # is_still_the_same_headline = are_colors_similar(headline_avg_color, last_headline_color, 2)
+            # if headline != '' and is_still_the_same_headline:  # Still processing the same headline, skip frames for the next 5 seconds
+            #     last_headline_frame = frame_count - seconds_to_frames(video_fps, 5)
+            #     has_headline_animation_count_started = False
+            #     headline_animation_start_frame = 0
+            if headline != '' and headline in headline_txts:
+                last_headline_frame = frame_count
+                do_ocr = False
+                has_headline_animation_count_started = False
+                headline_animation_start_frame = 0
+            elif headline != '':  # Save headline, reset counters
                 print('Frame:', frame_count, 'Headline:', headline)
                 last_headline_frame = frame_count
                 do_ocr = False
                 has_headline_animation_count_started = False
                 headline_animation_start_frame = 0
+                print(last_headline_color, headline_avg_color)
+
+                last_headline_color = headline_avg_color
 
                 headline_txts.append(headline)
                 headline_screenshots.append(headline_img)
@@ -125,7 +150,7 @@ def tvp_headlines_mp4(input_video_path, output_headlines_path, dst_screenshot_he
         last_headline_elapsed = frames_to_seconds(video_fps, frame_count - last_headline_frame)
         animation_time_elapsed = 0 if headline_animation_start_frame == 0 else frames_to_seconds(video_fps, frame_count - headline_animation_start_frame)
 
-        if frame_count % 100 == 0:
+        if frame_count % seconds_to_frames(video_fps, 10) == 0:
             print('Time elapsed:', f'{time_elapsed}s', '\tLast headline:', f'{last_headline_elapsed}s',
                   '\tHeadline animation:', f'{animation_time_elapsed}s', f'\tHeadline count: {len(headline_txts)}', f'FPS: {fps()}', frame_count)
 
@@ -194,7 +219,7 @@ def tvp_headlines_mp4_skip(input_video_path, output_headlines_path, video_name):
         frame_count += FRAMES_TO_SKIP
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count)
 
-        if frame_count % 100 == 0:
+        if frame_count % seconds_to_frames(10) == 0:
             print('Time elapsed:', f'{time_elapsed}s', '\tLast headline:', f'{last_headline_elapsed}s',
                   '\tHeadline animation:', f'{animation_time_elapsed}s', f'\tHeadline count: {len(headlines)}', f'FPS: {fps()}', frame_count)
 
@@ -208,6 +233,8 @@ def tvp_headlines_mp4_skip(input_video_path, output_headlines_path, video_name):
 def frames_to_seconds(fps, frame_count):
     return frame_count / fps
 
+def seconds_to_frames(fps, seconds):
+    return fps * seconds
 
 def save_headline(headline, path):
     with open(path, 'a') as f:
@@ -220,8 +247,18 @@ def create_dir(path):
         print(f"Directory {path} is created!")
 
 
-# Press the green button in the gutter to run the script.
-if __name__ == '__main__':
+def process_video(input_video_path):
+    video_name = os.path.basename(input_video_path).split('.mp4')[0]
+    dst_txt_headlines_path = os.path.join(dst_txt_headline_dir_path, f'{video_name}.txt')
+    dst_screenshot_headlines_path = os.path.join(dst_screenshot_headline_dir_path, f'{video_name}.jpg')
+
+    start_time = time.time()
+    tvp_headlines_mp4(input_video_path, dst_txt_headlines_path, dst_screenshot_headlines_path)
+
+    print("elasped time: {:.2f}s".format(time.time() - start_time))
+
+
+def process_videos():
     video_dir_path = 'data/'
     video_filenames = [filename for filename in os.listdir(video_dir_path) if filename.rsplit('.', 1)[1] == 'mp4']
     dst_txt_headline_dir_path = 'output/txt_headlines'
@@ -231,8 +268,6 @@ if __name__ == '__main__':
     create_dir(video_dir_path)
     create_dir(dst_txt_headline_dir_path)
     create_dir(dst_screenshot_headline_dir_path)
-
-    # download_video()
 
     for filename in video_filenames:
         video_name = filename.split('.mp4')[0]
@@ -245,3 +280,13 @@ if __name__ == '__main__':
         # tvp_headlines_mp4_skip(input_video_path, dst_txt_headlines_path)
 
         print("elasped time: {:.2f}s".format(time.time() - start_time))
+
+
+# Press the green button in the gutter to run the script.
+if __name__ == '__main__':
+    # download_video()
+    # download_all_videos()
+    process_videos()
+
+    # input_video_path = 'data/16.09.2023, 19_30.mp4'
+    # process_video(input_video_path)
