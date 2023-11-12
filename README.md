@@ -1,2 +1,2 @@
 # TVP-Headlines
- Python script that extracts TVP Headlines from .mp4 file with OpenCV and OCR (Tesseract)
+Downloading latest TVP News as .mp4 from https://vod.tvp.pl and extracting TVP Headlines with OpenCV and OCR (Tesseract)
