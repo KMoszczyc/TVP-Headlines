@@ -7,6 +7,11 @@ import time
 from FPS import FPS
 from video_download import download_video, download_all_videos
 import matplotlib.pyplot as plt
+import pandas as pd
+
+pd.set_option('display.max_columns', None)
+pd.set_option('display.max_rows', None)
+pd.options.mode.chained_assignment = None
 
 # Tesseract Page segmentation modes (-- psm):
 #   0    Orientation and script detection (OSD) only.
@@ -25,7 +30,7 @@ import matplotlib.pyplot as plt
 #  13    Raw line. Treat the image as a single text line, bypassing hacks that are Tesseract-specific. <-- OR THIS
 
 
-pytesseract.pytesseract.tesseract_cmd = 'D:/Program Files/Tesseract-OCR/tesseract.exe'
+pytesseract.pytesseract.tesseract_cmd = 'C:/Program Files/Tesseract-OCR/tesseract.exe'
 print(pytesseract.get_languages(config=''))
 
 HEADLINE_AVG_COLOR = (129.5148472, 62.9367192, 53.23520085)  # BGR
@@ -33,260 +38,291 @@ SECONDS_TO_SKIP_AFTER_LAST_HEADLINE = 20
 HEADLINE_ANIMATION_SECONDS = 3
 FRAMES_TO_SKIP = 75
 COLOR_SIMILARITY_THRESHOLD = 10
+OCR_CONFIDENCE_THRESHOLD = 80  # [0-100]
 
 dst_txt_headline_dir_path = 'output/txt_headlines'
 dst_screenshot_headline_dir_path = 'output/screenshot_headlines'
 last_headline_color = (0, 0, 0)
 
 
-def extract_headline(frame, do_ocr):
-    """Extract headline from a single frame"""
-    h, w, _ = frame.shape
-    x1 = int(w * 0.17)
-    x2 = int(w * 0.925)
-    y1 = int(h * 0.78)
-    y2 = int(h * 0.89)
+class HeadlineExtractor():
+    def __init__(self):
+        self.frame_count = 0
+        self.last_headline_frame = 0
+        self.headline_animation_start_frame = 0
+        self.has_headline_animation_count_started = False
+        self.headline_like_frame_detected = False
+        self.do_ocr = False
+        self.FPS = 0
+        self.headline_screenshots = []
+        self.headline_txts = []
+        self.headlines = []
+        self.ocr_processing_times = []
 
-    headline = ''
-    headline_like_frame_detected = False
-    headline_img = frame[y1:y2, x1:x2]
+    def extract_headline(self, frame):
+        """Extract headline from a single frame"""
+        h, w, _ = frame.shape
+        x1 = int(w * 0.17)
+        x2 = int(w * 0.925)
+        y1 = int(h * 0.78)
+        y2 = int(h * 0.89)
 
-    # Get avg color and compare it to a headline avg color
-    current_avg_color = np.average(np.average(headline_img, axis=0), axis=0)
+        headline = ''
+        self.headline_like_frame_detected = False
+        headline_img = frame[y1:y2, x1:x2]
 
-    # if bgr channels are less different than the COLOR_SIMILARITY_THRESHOLD (10), (in scale 0-255) then it's probably a headline
-    if are_colors_similar(HEADLINE_AVG_COLOR, current_avg_color, COLOR_SIMILARITY_THRESHOLD):
-        headline_like_frame_detected = True
-        if do_ocr:
-            resize_scale = 0.9
-            gray_img = cv2.cvtColor(headline_img, cv2.COLOR_BGR2GRAY)
-            ret, binary_img = cv2.threshold(gray_img, 80, 255, cv2.THRESH_BINARY)
-            resized_img = cv2.resize(binary_img, (0, 0), fx=resize_scale, fy=resize_scale, interpolation=cv2.INTER_AREA)
+        # Get avg color and compare it to a headline avg color
+        current_avg_color = np.average(np.average(headline_img, axis=0), axis=0)
 
-            headline = pytesseract.image_to_string(resized_img, config=r'--psm 7', lang='pol')
-            current_avg_color = tuple(int(x) for x in current_avg_color)
+        # if bgr channels are less different than the COLOR_SIMILARITY_THRESHOLD (10), (in scale 0-255) then it's probably a headline
+        if self.are_colors_similar(HEADLINE_AVG_COLOR, current_avg_color, COLOR_SIMILARITY_THRESHOLD):
+            self.headline_like_frame_detected = True
+            if self.do_ocr:
+                resize_scale = 0.9
+                gray_img = cv2.cvtColor(headline_img, cv2.COLOR_BGR2GRAY)
+                ret, binary_img = cv2.threshold(gray_img, 80, 255, cv2.THRESH_BINARY)
+                resized_img = cv2.resize(binary_img, (0, 0), fx=resize_scale, fy=resize_scale, interpolation=cv2.INTER_AREA)
 
-    return headline_img, headline, headline_like_frame_detected, current_avg_color
+                headline = self.ocr_on_img(resized_img)
+                current_avg_color = tuple(int(x) for x in current_avg_color)
 
+        return headline_img, headline, current_avg_color
 
-def calculate_color_diff(color_a, color_b):
-    return abs(np.subtract(color_a, color_b))
+    # TODO: 10.11.2023 brakujący "alarm: ucieczka spod buta łukaszenki - frame: 25164 time: 1006.56
+    def ocr_on_img(self, img):
+        df = pytesseract.image_to_data(img, lang='pol', config=r'--psm 7', output_type='data.frame')
+        df_filtered = df[df['text'].notna()]
 
+        print('frame:', self.frame_count, 'time:', self.frames_to_seconds(self.frame_count))
+        # print('AAAAAAAAAAAAAA')
+        #
+        # print(df.head(50))
+        # print('BBBBBBBBBBBBBBB')
+        #
+        # print(df_filtered.head(50))
 
-def are_colors_similar(color_a, color_b, threshold):
-    color_diff = calculate_color_diff(color_a, color_b)
-    return color_diff[0] <= threshold and color_diff[1] <= threshold and color_diff[2] <= threshold
+        if df_filtered.empty:
+            self.reset_animation_counters()
+            return ''
 
+        # print('CCCCCCCCCCCCCCCCC')
+        df_filtered['text'] = df_filtered['text'].str.strip()
+        is_correct = len(
+            df_filtered[(df_filtered['conf'] < OCR_CONFIDENCE_THRESHOLD) | (df_filtered['text'].str.contains('\|')) | (df_filtered['text'] == '')]) == 0
+        #
+        # print(len(df_filtered[(df_filtered['conf'] < OCR_CONFIDENCE_THRESHOLD)]), len(df_filtered[df_filtered['text'].str.contains("\|")]), len(df_filtered[df_filtered['text'] == '']))
+        # print(df_filtered.head(50))
 
-def tvp_headlines_mp4(input_video_path, output_headlines_path, dst_screenshot_headlines_path):
-    """Extract all headlines from a .mp4 file"""
-    global last_headline_color
-    cap = cv2.VideoCapture(input_video_path)
-    fps = FPS()
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    video_fps = cap.get(cv2.CAP_PROP_FPS)
+        if is_correct:
+            # headline = ' '.join(df_filtered['text'].to_list())
+            headline = pytesseract.image_to_string(img, config=r'--psm 7', lang='pol')
+        else:
+            headline = ''
+            self.reset_animation_counters()
+        # print(is_correct, headline)
 
-    print(width, height, video_fps)
+        return headline
 
-    headline_txts = []
-    frame_count = 0
-    last_headline_frame = 0
-    headline_animation_start_frame = 0
-    has_headline_animation_count_started = False
-    do_ocr = False
-    headline_screenshots = []
+    def calculate_color_diff(self, color_a, color_b):
+        return abs(np.subtract(color_a, color_b))
 
-    while True:
+    def are_colors_similar(self, color_a, color_b, threshold):
+        color_diff = self.calculate_color_diff(color_a, color_b)
+        return color_diff[0] <= threshold and color_diff[1] <= threshold and color_diff[2] <= threshold
 
-        ret, frame = cap.read()
-        if not ret:
-            break
+    def reset_animation_counters(self):
+        self.has_headline_animation_count_started = False
+        self.headline_animation_start_frame = self.frame_count
+        self.headline_like_frame_detected = False
+        self.do_ocr = False
 
-        # Skip ocr if last headline was seen 20s ago
-        if frames_to_seconds(video_fps, frame_count - last_headline_frame) > SECONDS_TO_SKIP_AFTER_LAST_HEADLINE:
+    def reset_all_counters(self):
+        self.last_headline_frame = self.frame_count
+        self.do_ocr = False
+        self.has_headline_animation_count_started = False
+        self.headline_animation_start_frame = 0
 
-            # Wait for headline animation to end (2S) - makes sure that we don't OCR on an empty headline or that we skip short headlines with currently presented person names
-            if frames_to_seconds(video_fps, frame_count - headline_animation_start_frame) > HEADLINE_ANIMATION_SECONDS and has_headline_animation_count_started:
-                do_ocr = True
+    def tvp_headlines_mp4(self, input_video_path, output_headlines_path, dst_screenshot_headlines_path):
+        """Extract all headlines from a .mp4 file"""
+        global last_headline_color
+        cap = cv2.VideoCapture(input_video_path)
+        fps = FPS()
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.FPS = cap.get(cv2.CAP_PROP_FPS)
 
-            # Extract headline with ocr
-            headline_img, headline, headline_like_frame_detected, headline_avg_color = extract_headline(frame, do_ocr)
+        print(width, height, self.FPS)
 
-            # If extract_headline stopped detecting headline-like frames then stop animation counters (headline-like frames must be detected every frame for at least 2 seconds)
-            if has_headline_animation_count_started and not headline_like_frame_detected:
-                has_headline_animation_count_started = False
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-            # If headline-like frame was detected and animation counter hasn't started yet then start it
-            if headline_like_frame_detected and not has_headline_animation_count_started:
-                has_headline_animation_count_started = True
-                headline_animation_start_frame = frame_count
+            # Skip ocr if last headline was seen 20s ago
+            if self.frames_to_seconds(self.frame_count - self.last_headline_frame) > SECONDS_TO_SKIP_AFTER_LAST_HEADLINE:
 
-            # is_still_the_same_headline = are_colors_similar(headline_avg_color, last_headline_color, 2)
-            # if headline != '' and is_still_the_same_headline:  # Still processing the same headline, skip frames for the next 5 seconds
-            #     last_headline_frame = frame_count - seconds_to_frames(video_fps, 5)
-            #     has_headline_animation_count_started = False
-            #     headline_animation_start_frame = 0
-            if headline != '' and headline in headline_txts:
-                last_headline_frame = frame_count
-                do_ocr = False
-                has_headline_animation_count_started = False
-                headline_animation_start_frame = 0
-            elif headline != '':  # Save headline, reset counters
-                print('Frame:', frame_count, 'Headline:', headline)
-                last_headline_frame = frame_count
-                do_ocr = False
-                has_headline_animation_count_started = False
-                headline_animation_start_frame = 0
-                print(last_headline_color, headline_avg_color)
+                # Wait for headline animation to end (2S) - makes sure that we don't OCR on an empty headline or that we skip short headlines with currently presented person names
+                if self.frames_to_seconds(self.frame_count - self.headline_animation_start_frame) > HEADLINE_ANIMATION_SECONDS and self.has_headline_animation_count_started:
+                    self.do_ocr = True
 
-                last_headline_color = headline_avg_color
+                # Extract headline with ocr
+                headline_img, headline, headline_avg_color = self.extract_headline(frame)
 
-                headline_txts.append(headline)
-                headline_screenshots.append(headline_img)
-                save_headline(headline, output_headlines_path)
+                # If headline-like frame was detected and animation counter hasn't started yet then start it
+                if self.headline_like_frame_detected and not self.has_headline_animation_count_started:
+                    self.has_headline_animation_count_started = True
+                    self.headline_animation_start_frame = self.frame_count
 
-        time_elapsed = frames_to_seconds(video_fps, frame_count)
-        last_headline_elapsed = frames_to_seconds(video_fps, frame_count - last_headline_frame)
-        animation_time_elapsed = 0 if headline_animation_start_frame == 0 else frames_to_seconds(video_fps, frame_count - headline_animation_start_frame)
+                # If extract_headline stopped detecting headline-like frames then stop animation counters (headline-like frames must be detected every frame for at least 2 seconds)
+                if self.has_headline_animation_count_started and not self.headline_like_frame_detected:
+                    self.has_headline_animation_count_started = False
+                    self.headline_animation_start_frame = self.frame_count
 
-        if frame_count % seconds_to_frames(video_fps, 10) == 0:
-            print('Time elapsed:', f'{time_elapsed}s', '\tLast headline:', f'{last_headline_elapsed}s',
-                  '\tHeadline animation:', f'{animation_time_elapsed}s', f'\tHeadline count: {len(headline_txts)}', f'FPS: {fps()}', frame_count)
+                if headline != '' and headline in self.headline_txts:
+                    self.reset_all_counters()
+                elif headline != '':  # Save headline, reset counters
+                    print('Frame:', self.frame_count, 'Headline:', headline)
+                    print(last_headline_color, headline_avg_color)
+                    last_headline_color = headline_avg_color
 
-        frame_count += 1
+                    self.reset_all_counters()
+                    self.headline_txts.append(headline)
+                    self.headline_screenshots.append(headline_img)
+                    self.save_headline(headline, output_headlines_path)
 
-        # cv2.imshow('frame', frame)
-        # c = cv2.waitKey(1)
-        # if c & 0xFF == ord('q'):
-        #     break
+            time_elapsed = self.frames_to_seconds(self.frame_count)
+            last_headline_elapsed = self.frames_to_seconds(self.frame_count - self.last_headline_frame)
+            animation_time_elapsed = 0 if self.headline_animation_start_frame == 0 else self.frames_to_seconds(
+                self.frame_count - self.headline_animation_start_frame)
 
-    # Save merged headline screenshots
-    screenshots_merged = np.concatenate(headline_screenshots, axis=0)
-    cv2.imwrite(dst_screenshot_headlines_path, screenshots_merged)
+            if self.frame_count % self.seconds_to_frames(10) == 0:
+                print('Time elapsed:', f'{time_elapsed}s', '\tLast headline:', f'{last_headline_elapsed}s',
+                      '\tHeadline animation:', f'{animation_time_elapsed}s', f'\tHeadline count: {len(self.headline_txts)}', f'FPS: {fps()}', self.frame_count)
 
-    cap.release()
-    cv2.destroyAllWindows()
-    # fvs.stop()
+            self.frame_count += 1
 
-    print(headline_txts)
+            # cv2.imshow('frame', frame)
+            # c = cv2.waitKey(1)
+            # if c & 0xFF == ord('q'):
+            #     break
 
+        # Save merged headline screenshots
+        screenshots_merged = np.concatenate(self.headline_screenshots, axis=0)
+        cv2.imwrite(dst_screenshot_headlines_path, screenshots_merged)
 
-def tvp_headlines_mp4_skip(input_video_path, output_headlines_path, video_name):
-    """Extract all headlines from a .mp4 file"""
+        cap.release()
+        cv2.destroyAllWindows()
+        # fvs.stop()
 
-    cap = cv2.VideoCapture(input_video_path)
-    fps = FPS()
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    video_fps = cap.get(cv2.CAP_PROP_FPS)
+        print(self.headline_txts)
 
-    print(width, height, video_fps)
+    def tvp_headlines_mp4_skip(self, input_video_path, output_headlines_path, video_name):
+        """Extract all headlines from a .mp4 file"""
 
-    headlines = []
-    frame_count = 0
-    last_headline_frame = 0
-    headline_animation_start_frame = 0
+        cap = cv2.VideoCapture(input_video_path)
+        fps = FPS()
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        video_fps = cap.get(cv2.CAP_PROP_FPS)
 
-    ocr_processing_times = []
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+        print(width, height, video_fps)
 
-        # Skip ocr if last headline was seen 20s ago
-        if frames_to_seconds(video_fps, frame_count - last_headline_frame) > SECONDS_TO_SKIP_AFTER_LAST_HEADLINE:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-            # Extract headline with ocr
-            start_time = time.time()
-            headline_img, headline, headline_like_frame_detected = extract_headline(frame, True)
-            ocr_processing_times.append(time.time() - start_time)
+            # Skip ocr if last headline was seen 20s ago
+            if self.frames_to_seconds(self.frame_count - self.last_headline_frame) > SECONDS_TO_SKIP_AFTER_LAST_HEADLINE:
 
-            # Save headline, reset counters
-            if headline != '':
-                print('Frame:', frame_count, 'Headline:', headline)
-                last_headline_frame = frame_count
-                headlines.append(headline)
-                headline_animation_start_frame = 0
+                # Extract headline with ocr
+                start_time = time.time()
+                headline_img, headline, headline_like_frame_detected = self.extract_headline(frame, True)
+                self.ocr_processing_times.append(time.time() - start_time)
 
-                save_headline(headline, output_headlines_path)
+                # Save headline, reset counters
+                if headline != '':
+                    print('Frame:', self.frame_count, 'Headline:', headline)
+                    self.last_headline_frame = self.frame_count
+                    self.headline_txts.append(headline)
+                    self.headline_animation_start_frame = 0
 
-        time_elapsed = frames_to_seconds(video_fps, frame_count)
-        last_headline_elapsed = frames_to_seconds(video_fps, frame_count - last_headline_frame)
-        animation_time_elapsed = 0 if headline_animation_start_frame == 0 else frames_to_seconds(video_fps, frame_count - headline_animation_start_frame)
+                    self.save_headline(headline, output_headlines_path)
 
-        # Skip frames equal to FRAMES_TO_SKIP
-        frame_count += FRAMES_TO_SKIP
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count)
+            time_elapsed = self.frames_to_seconds(self.frame_count)
+            last_headline_elapsed = self.frames_to_seconds(self.frame_count - self.last_headline_frame)
+            animation_time_elapsed = 0 if self.headline_animation_start_frame == 0 else self.frames_to_seconds(self.frame_count - self.headline_animation_start_frame)
 
-        if frame_count % seconds_to_frames(10) == 0:
-            print('Time elapsed:', f'{time_elapsed}s', '\tLast headline:', f'{last_headline_elapsed}s',
-                  '\tHeadline animation:', f'{animation_time_elapsed}s', f'\tHeadline count: {len(headlines)}', f'FPS: {fps()}', frame_count)
+            # Skip frames equal to FRAMES_TO_SKIP
+            self.frame_count += FRAMES_TO_SKIP
+            cap.set(cv2.CAP_PROP_POS_FRAMES, self.frame_count)
 
-    cap.release()
-    cv2.destroyAllWindows()
+            if self.frame_count % self.seconds_to_frames(10) == 0:
+                print('Time elapsed:', f'{time_elapsed}s', '\tLast headline:', f'{last_headline_elapsed}s',
+                      '\tHeadline animation:', f'{animation_time_elapsed}s', f'\tHeadline count: {len(self.headline_txts)}', f'FPS: {fps()}', self.frame_count)
 
-    print(headlines)
-    print('OCR elapsed times:', [str(round(x, 3)) + 's' for x in sorted(ocr_processing_times, reverse=True)[:10]])
+        cap.release()
+        cv2.destroyAllWindows()
 
+        print(self.headline_txts)
+        print('OCR elapsed times:', [str(round(x, 3)) + 's' for x in sorted(self.ocr_processing_times, reverse=True)[:10]])
 
-def frames_to_seconds(fps, frame_count):
-    return frame_count / fps
+    def frames_to_seconds(self, frame_count):
+        return frame_count / self.FPS
 
-def seconds_to_frames(fps, seconds):
-    return fps * seconds
+    def seconds_to_frames(self, seconds):
+        return self.FPS * seconds
 
-def save_headline(headline, path):
-    with open(path, 'a') as f:
-        f.write(headline.strip('\n') + '\n')
+    def save_headline(self, headline, path):
+        with open(path, 'a') as f:
+            f.write(headline.strip('\n') + '\n')
 
+    def create_dir(self, path):
+        if not os.path.exists(path):
+            os.makedirs(path)
+            print(f"Directory {path} is created!")
 
-def create_dir(path):
-    if not os.path.exists(path):
-        os.makedirs(path)
-        print(f"Directory {path} is created!")
-
-
-def process_video(input_video_path):
-    video_name = os.path.basename(input_video_path).split('.mp4')[0]
-    dst_txt_headlines_path = os.path.join(dst_txt_headline_dir_path, f'{video_name}.txt')
-    dst_screenshot_headlines_path = os.path.join(dst_screenshot_headline_dir_path, f'{video_name}.jpg')
-
-    start_time = time.time()
-    tvp_headlines_mp4(input_video_path, dst_txt_headlines_path, dst_screenshot_headlines_path)
-
-    print("elasped time: {:.2f}s".format(time.time() - start_time))
-
-
-def process_videos():
-    video_dir_path = 'data/'
-    video_filenames = [filename for filename in os.listdir(video_dir_path) if filename.rsplit('.', 1)[1] == 'mp4']
-    dst_txt_headline_dir_path = 'output/txt_headlines'
-    dst_screenshot_headline_dir_path = 'output/screenshot_headlines'
-
-    # create dirs if they don't exist
-    create_dir(video_dir_path)
-    create_dir(dst_txt_headline_dir_path)
-    create_dir(dst_screenshot_headline_dir_path)
-
-    for filename in video_filenames:
-        video_name = filename.split('.mp4')[0]
-        input_video_path = os.path.join(video_dir_path, filename)
+    def process_video(self, input_video_path):
+        video_name = os.path.basename(input_video_path).split('.mp4')[0]
         dst_txt_headlines_path = os.path.join(dst_txt_headline_dir_path, f'{video_name}.txt')
         dst_screenshot_headlines_path = os.path.join(dst_screenshot_headline_dir_path, f'{video_name}.jpg')
 
         start_time = time.time()
-        tvp_headlines_mp4(input_video_path, dst_txt_headlines_path, dst_screenshot_headlines_path)
-        # tvp_headlines_mp4_skip(input_video_path, dst_txt_headlines_path)
+        self.tvp_headlines_mp4(input_video_path, dst_txt_headlines_path, dst_screenshot_headlines_path)
 
         print("elasped time: {:.2f}s".format(time.time() - start_time))
+
+    def process_videos(self):
+        video_dir_path = 'data/'
+        video_filenames = [filename for filename in os.listdir(video_dir_path) if filename.rsplit('.', 1)[1] == 'mp4']
+        dst_txt_headline_dir_path = 'output/txt_headlines'
+        dst_screenshot_headline_dir_path = 'output/screenshot_headlines'
+
+        # create dirs if they don't exist
+        self.create_dir(video_dir_path)
+        self.create_dir(dst_txt_headline_dir_path)
+        self.create_dir(dst_screenshot_headline_dir_path)
+
+        for filename in video_filenames:
+            video_name = filename.split('.mp4')[0]
+            input_video_path = os.path.join(video_dir_path, filename)
+            dst_txt_headlines_path = os.path.join(dst_txt_headline_dir_path, f'{video_name}.txt')
+            dst_screenshot_headlines_path = os.path.join(dst_screenshot_headline_dir_path, f'{video_name}.jpg')
+
+            start_time = time.time()
+            self.tvp_headlines_mp4(input_video_path, dst_txt_headlines_path, dst_screenshot_headlines_path)
+            # self.tvp_headlines_mp4_skip(input_video_path, dst_txt_headlines_path)
+
+            print("elasped time: {:.2f}s".format(time.time() - start_time))
 
 
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
     # download_video()
     # download_all_videos()
-    process_videos()
 
-    # input_video_path = 'data/16.09.2023, 19_30.mp4'
-    # process_video(input_video_path)
+    extractor = HeadlineExtractor()
+    # extractor.process_videos()
+
+    input_video_path = 'data/10.11.2023, 19_30.mp4'
+    extractor.process_video(input_video_path)

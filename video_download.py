@@ -58,7 +58,22 @@ def download_video():
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download(latest_news_url)
 
+def download_mp3(url):
+    output_path = os.path.join(os.path.abspath(os.getcwd()), 'data', '%(title)s.%(ext)s')
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': output_path
+    }
+
+    # latest_news_url = get_latest_tvp_news_url()
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download(url)
 
 if __name__ == "__main__":
-    urls = get_all_tvp_news_urls()
-    print(urls)
+    # urls = get_all_tvp_news_urls()
+    # print(urls)
+
+    url = "https://archive.org/details/johnny-rebel-full-compilation/Johnny+Rebel+Nigger+Hatin'+Me.mp3"
+    download_mp3(url)
+
