@@ -42,6 +42,7 @@ OCR_CONFIDENCE_THRESHOLD = 80  # [0-100]
 
 dst_txt_headline_dir_path = 'output/txt_headlines'
 dst_screenshot_headline_dir_path = 'output/screenshot_headlines'
+dst_merged_txt_headlines_path =  'output/merged_headlines.txt'
 last_headline_color = (0, 0, 0)
 
 
@@ -152,6 +153,8 @@ class HeadlineExtractor():
         self.FPS = cap.get(cv2.CAP_PROP_FPS)
 
         print(width, height, self.FPS)
+        with open(output_headlines_path, 'w') as f:
+            f.write('')
 
         while True:
             ret, frame = cap.read()
@@ -226,6 +229,8 @@ class HeadlineExtractor():
         video_fps = cap.get(cv2.CAP_PROP_FPS)
 
         print(width, height, video_fps)
+        with open(output_headlines_path, 'w') as f:
+            f.write('')
 
         while True:
             ret, frame = cap.read()
@@ -277,6 +282,25 @@ class HeadlineExtractor():
         with open(path, 'a') as f:
             f.write(headline.strip('\n') + '\n')
 
+    def read_txt_file(self, path):
+        with open(path, 'r') as f:
+            return f.readlines()
+
+    def merge_all_headlines(self):
+        """Merge all headline txt files into single txt file."""
+        all_headlines = []
+        filenames = os.listdir(dst_txt_headline_dir_path)
+        for filename in filenames:
+            file_path = os.path.join(dst_txt_headline_dir_path, filename)
+            print(file_path)
+            headlines = self.read_txt_file(file_path)
+
+            all_headlines.extend(headlines)
+
+        # Save
+        with open(dst_merged_txt_headlines_path, 'w') as f:
+            f.writelines(all_headlines)
+
     def create_dir(self, path):
         if not os.path.exists(path):
             os.makedirs(path)
@@ -322,7 +346,9 @@ if __name__ == '__main__':
     # download_all_videos()
 
     extractor = HeadlineExtractor()
-    # extractor.process_videos()
+    # # extractor.process_videos()
+    #
+    # input_video_path = 'data/10.11.2023, 19_30.mp4'
+    # extractor.process_video(input_video_path)
 
-    input_video_path = 'data/10.11.2023, 19_30.mp4'
-    extractor.process_video(input_video_path)
+    extractor.merge_all_headlines()
